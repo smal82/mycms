@@ -1,0 +1,1101 @@
+<?php
+/**
+ * FILE: /core/Database.php
+ * Gestione database e query
+ */
+
+class Database {
+    public $pdo;
+    private $prefix;
+    
+    public function __construct() {
+        try {
+            $dsn = 'mysql:host=' . DB_HOST . ';dbname=' . DB_NAME . ';charset=' . DB_CHARSET;
+            $this->pdo = new PDO($dsn, DB_USER, DB_PASS);
+            $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $this->pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+            $this->prefix = defined('DB_PREFIX') ? DB_PREFIX : '';
+        } catch (PDOException $e) {
+            die("Errore connessione database: " . $e->getMessage());
+        }
+    }
+    
+    private function table($name) {
+        return $this->prefix . $name;
+    }
+    
+    // === IMPOSTAZIONI ===
+    public function getSetting($key, $default = null) {
+        $stmt = $this->pdo->prepare("SELECT setting_value FROM " . $this->table('settings') . " WHERE setting_key = ?");
+        $stmt->execute([$key]);
+        $result = $stmt->fetch();
+        return $result ? $result['setting_value'] : $default;
+    }
+    
+    // === GESTIONE CESTINO MEDIA ===
+
+/**
+ * Sposta un file media nel cestino
+ */
+public function trashMedia($id) {
+    $stmt = $this->pdo->prepare("UPDATE " . $this->table('uploads') . " SET deleted_at = NOW() WHERE id=?");
+    return $stmt->execute([$id]);
+}
+
+/**
+ * Recupera tutti i media nel cestino
+ */
+public function getTrashedMedia() {
+    return $this->pdo->query("SELECT * FROM " . $this->table('uploads') . " 
+                              WHERE deleted_at IS NOT NULL 
+                              ORDER BY deleted_at DESC")->fetchAll();
+}
+
+/**
+ * Ripristina un file media dal cestino
+ */
+public function restoreMedia($id) {
+    $stmt = $this->pdo->prepare("UPDATE " . $this->table('uploads') . " SET deleted_at = NULL WHERE id=?");
+    return $stmt->execute([$id]);
+}
+
+/**
+ * Elimina definitivamente un file media
+ */
+public function deleteMediaPermanently($id) {
+    // Ottieni info file
+    $stmt = $this->pdo->prepare("SELECT filename FROM " . $this->table('uploads') . " WHERE id=?");
+    $stmt->execute([$id]);
+    $media = $stmt->fetch();
+    
+    if ($media) {
+        // Elimina file fisico
+        $filepath = '../uploads/' . $media['filename'];
+        if (file_exists($filepath)) {
+            unlink($filepath);
+        }
+        
+        // Elimina dal database
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('uploads') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    return false;
+}
+
+/**
+ * Svuota completamente il cestino dei media
+ */
+public function emptyMediaTrash() {
+    $trashedMedia = $this->getTrashedMedia();
+    foreach ($trashedMedia as $media) {
+        $this->deleteMediaPermanently($media['id']);
+    }
+    return true;
+}
+
+/**
+ * Ottieni tutti i file media (esclusi quelli nel cestino)
+ */
+public function getAllUploads() {
+    return $this->pdo->query("SELECT * FROM " . $this->table('uploads') . " 
+                              WHERE deleted_at IS NULL 
+                              ORDER BY created_at DESC")->fetchAll();
+}
+
+/**
+ * Verifica se un file è stato eliminato (per lo script di protezione)
+ */
+public function isMediaDeleted($filename) {
+    $stmt = $this->pdo->prepare("SELECT deleted_at FROM " . $this->table('uploads') . " WHERE filename=?");
+    $stmt->execute([$filename]);
+    $result = $stmt->fetch();
+    
+    return $result && $result['deleted_at'] !== null;
+}
+
+/**
+ * Ottieni info media dal filename
+ */
+public function getMediaByFilename($filename) {
+    $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('uploads') . " WHERE filename=?");
+    $stmt->execute([$filename]);
+    return $stmt->fetch();
+}
+
+    
+    public function saveSetting($key, $value) {
+        try {
+            $stmt = $this->pdo->prepare("
+                INSERT INTO " . $this->table('settings') . " (setting_key, setting_value) 
+                VALUES (?, ?)
+                ON DUPLICATE KEY UPDATE setting_value = ?
+            ");
+            return $stmt->execute([$key, $value, $value]);
+        } catch (PDOException $e) {
+            error_log('Error saving setting: ' . $e->getMessage());
+            return false;
+        }
+    }
+    
+    public function setSetting($key, $value) {
+        $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('settings') . " (setting_key, setting_value) VALUES (?, ?) 
+                                     ON DUPLICATE KEY UPDATE setting_value=?");
+        return $stmt->execute([$key, $value, $value]);
+    }
+    
+    // ==========================================
+// CUSTOM POST TYPES
+// ==========================================
+
+/**
+ * Recupera tutti i Custom Post Types registrati
+ */
+public function getCustomPostTypes($publicOnly = false) {
+    $sql = "SELECT * FROM " . $this->table('custom_post_types');
+    if ($publicOnly) {
+        $sql .= " WHERE public = 1 AND show_in_menu = 1";
+    }
+    $sql .= " ORDER BY menu_position, name";
+    return $this->pdo->query($sql)->fetchAll();
+}
+
+/**
+ * Recupera un CPT specifico per nome
+ */
+public function getCustomPostType($name) {
+    $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('custom_post_types') . " WHERE name=?");
+    $stmt->execute([$name]);
+    return $stmt->fetch();
+}
+
+/**
+ * Salva/Aggiorna un Custom Post Type con validazione rigorosa
+ */
+public function saveCustomPostType($data) {
+    $errors = [];
+    
+    // === VALIDAZIONE NOME (solo per nuovi CPT) ===
+    if (!isset($data['id']) || !$data['id']) {
+        if (empty($data['name'])) {
+            $errors[] = "Il nome tecnico è obbligatorio";
+        } else {
+            // Solo lettere minuscole, numeri e underscore
+            if (!preg_match('/^[a-z0-9_]+$/', $data['name'])) {
+                $errors[] = "Il nome tecnico può contenere solo lettere minuscole, numeri e underscore";
+            }
+            
+            // Lunghezza massima 50 caratteri
+            if (strlen($data['name']) > 50) {
+                $errors[] = "Il nome tecnico non può superare i 50 caratteri";
+            }
+            
+            // Lunghezza minima 3 caratteri
+            if (strlen($data['name']) < 3) {
+                $errors[] = "Il nome tecnico deve avere almeno 3 caratteri";
+            }
+            
+            // Nomi riservati
+            $reserved = ['post', 'page', 'attachment', 'revision', 'nav_menu_item', 'admin', 'dashboard', 'settings', 'users', 'plugins', 'themes'];
+            if (in_array($data['name'], $reserved)) {
+                $errors[] = "Il nome '{$data['name']}' è riservato dal sistema";
+            }
+            
+            // Controlla se nome già esiste
+            $stmt = $this->pdo->prepare("SELECT id FROM " . $this->table('custom_post_types') . " WHERE name=?");
+            $stmt->execute([$data['name']]);
+            if ($stmt->fetch()) {
+                $errors[] = "Esiste già un Custom Post Type con nome '{$data['name']}'";
+            }
+        }
+    }
+    
+    // === VALIDAZIONE SLUG ===
+    if (empty($data['slug'])) {
+        $errors[] = "Lo slug è obbligatorio";
+    } else {
+        // Solo lettere minuscole, numeri e trattini
+        if (!preg_match('/^[a-z0-9-]+$/', $data['slug'])) {
+            $errors[] = "Lo slug può contenere solo lettere minuscole, numeri e trattini";
+        }
+        
+        // Lunghezza massima 100 caratteri
+        if (strlen($data['slug']) > 100) {
+            $errors[] = "Lo slug non può superare i 100 caratteri";
+        }
+        
+        // Non può iniziare o finire con trattino
+        if (preg_match('/^-|-$/', $data['slug'])) {
+            $errors[] = "Lo slug non può iniziare o finire con un trattino";
+        }
+        
+        // Controlla slug univoco (escluso record corrente se in update)
+        $checkSlugSql = "SELECT id FROM " . $this->table('custom_post_types') . " WHERE slug=?";
+        $params = [$data['slug']];
+        if (isset($data['id']) && $data['id']) {
+            $checkSlugSql .= " AND id != ?";
+            $params[] = $data['id'];
+        }
+        $stmt = $this->pdo->prepare($checkSlugSql);
+        $stmt->execute($params);
+        if ($stmt->fetch()) {
+            $errors[] = "Esiste già un Custom Post Type con slug '{$data['slug']}'";
+        }
+    }
+    
+    // === VALIDAZIONE LABEL ===
+    if (empty($data['singular_label'])) {
+        $errors[] = "L'etichetta singolare è obbligatoria";
+    } elseif (strlen($data['singular_label']) > 100) {
+        $errors[] = "L'etichetta singolare non può superare i 100 caratteri";
+    }
+    
+    if (empty($data['plural_label'])) {
+        $errors[] = "L'etichetta plurale è obbligatoria";
+    } elseif (strlen($data['plural_label']) > 100) {
+        $errors[] = "L'etichetta plurale non può superare i 100 caratteri";
+    }
+    
+    // === VALIDAZIONE MENU POSITION ===
+    if (isset($data['menu_position']) && !is_numeric($data['menu_position'])) {
+        $errors[] = "La posizione nel menu deve essere un numero";
+    }
+    
+    // === VALIDAZIONE ICON ===
+    if (!empty($data['icon']) && strlen($data['icon']) > 50) {
+        $errors[] = "Il nome dell'icona non può superare i 50 caratteri";
+    }
+    
+    // === VALIDAZIONE SUPPORTS ===
+    if (isset($data['supports'])) {
+        if (!is_array($data['supports'])) {
+            $errors[] = "Il campo 'supports' deve essere un array";
+        } else {
+            $validSupports = ['title', 'content', 'featured_image', 'excerpt', 'categories', 'author', 'comments'];
+            foreach ($data['supports'] as $support) {
+                if (!in_array($support, $validSupports)) {
+                    $errors[] = "Funzionalità '{$support}' non valida. Valori consentiti: " . implode(', ', $validSupports);
+                }
+            }
+        }
+    }
+    
+    // Se ci sono errori, lanciali
+    if (!empty($errors)) {
+        throw new Exception("Errori di validazione:\n- " . implode("\n- ", $errors));
+    }
+    
+    // === SALVATAGGIO ===
+    // Prepara il JSON per supports
+    $supports = isset($data['supports']) ? json_encode($data['supports']) : json_encode(['title', 'content']);
+    
+    if (isset($data['id']) && $data['id']) {
+        // Update
+        $stmt = $this->pdo->prepare("UPDATE " . $this->table('custom_post_types') . " 
+            SET singular_label=?, plural_label=?, slug=?, description=?, icon=?, supports=?, 
+                menu_position=?, public=?, show_in_menu=?, has_archive=?, hierarchical=?, rewrite_slug=?
+            WHERE id=?");
+        return $stmt->execute([
+            $data['singular_label'],
+            $data['plural_label'],
+            $data['slug'],
+            $data['description'] ?? '',
+            $data['icon'] ?? 'document',
+            $supports,
+            $data['menu_position'] ?? 5,
+            $data['public'] ?? 1,
+            $data['show_in_menu'] ?? 1,
+            $data['has_archive'] ?? 1,
+            $data['hierarchical'] ?? 0,
+            $data['rewrite_slug'] ?? $data['slug'],
+            $data['id']
+        ]);
+    } else {
+        // Insert
+        $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('custom_post_types') . " 
+            (name, singular_label, plural_label, slug, description, icon, supports, menu_position, public, show_in_menu, has_archive, hierarchical, rewrite_slug) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
+        return $stmt->execute([
+            $data['name'],
+            $data['singular_label'],
+            $data['plural_label'],
+            $data['slug'],
+            $data['description'] ?? '',
+            $data['icon'] ?? 'document',
+            $supports,
+            $data['menu_position'] ?? 5,
+            $data['public'] ?? 1,
+            $data['show_in_menu'] ?? 1,
+            $data['has_archive'] ?? 1,
+            $data['hierarchical'] ?? 0,
+            $data['rewrite_slug'] ?? $data['slug']
+        ]);
+    }
+}
+
+/**
+ * Elimina un Custom Post Type
+ */
+public function deleteCustomPostType($id) {
+    // Prima elimina tutti i post di questo tipo
+    $cpt = $this->pdo->query("SELECT name FROM " . $this->table('custom_post_types') . " WHERE id = $id")->fetch();
+    if ($cpt) {
+        $this->pdo->prepare("DELETE FROM " . $this->table('posts') . " WHERE post_type=?")->execute([$cpt['name']]);
+    }
+    
+    $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('custom_post_types') . " WHERE id=?");
+    return $stmt->execute([$id]);
+}
+
+/**
+ * Recupera tutti i post di un tipo specifico
+ */
+public function getPostsByType($postType, $status = null) {
+    $sql = "SELECT p.*, u.name as author_name 
+            FROM " . $this->table('posts') . " p 
+            LEFT JOIN " . $this->table('users') . " u ON p.author_id = u.id 
+            WHERE p.post_type = ? AND p.deleted_at IS NULL";
+    
+    $params = [$postType];
+    
+    if ($status) {
+        $sql .= " AND p.status = ?";
+        $params[] = $status;
+    }
+    
+    $sql .= " ORDER BY p.created_at DESC";
+    
+    $stmt = $this->pdo->prepare($sql);
+    $stmt->execute($params);
+    return $stmt->fetchAll();
+}
+
+/**
+ * Salva un post di qualsiasi tipo (generico)
+ */
+public function saveCustomPost($data) {
+    // Hook prima del salvataggio
+    $data = apply_hook('mycms_before_save_custom_post', $data);
+    
+    // Assicurati che post_type sia impostato
+    if (!isset($data['post_type'])) {
+        $data['post_type'] = 'post';
+    }
+    
+    if (isset($data['id']) && $data['id']) {
+        $stmt = $this->pdo->prepare("UPDATE " . $this->table('posts') . " 
+            SET post_type=?, title=?, slug=?, content=?, excerpt=?, featured_image=?, status=? 
+            WHERE id=?");
+        $result = $stmt->execute([
+            $data['post_type'],
+            $data['title'],
+            $data['slug'],
+            $data['content'],
+            $data['excerpt'] ?? '',
+            $data['featured_image'] ?? null,
+            $data['status'],
+            $data['id']
+        ]);
+        $postId = $data['id'];
+    } else {
+        $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('posts') . " 
+            (post_type, title, slug, content, excerpt, featured_image, status, author_id) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+        $result = $stmt->execute([
+            $data['post_type'],
+            $data['title'],
+            $data['slug'],
+            $data['content'],
+            $data['excerpt'] ?? '',
+            $data['featured_image'] ?? null,
+            $data['status'],
+            $_SESSION['user_id']
+        ]);
+        $postId = $this->pdo->lastInsertId();
+    }
+    
+    // Gestisci categorie se supportate
+    if ($result && isset($data['categories'])) {
+        $this->pdo->prepare("DELETE FROM " . $this->table('post_categories') . " WHERE post_id=?")->execute([$postId]);
+        if (!empty($data['categories'])) {
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('post_categories') . " (post_id, category_id) VALUES (?, ?)");
+            foreach ($data['categories'] as $catId) {
+                $stmt->execute([$postId, $catId]);
+            }
+        }
+    }
+    
+    // Hook dopo il salvataggio
+    do_hook('mycms_after_save_custom_post', $postId, $data);
+    
+    return $postId;
+}
+
+// ==========================================
+// POST META (Custom Fields)
+// ==========================================
+
+/**
+ * Aggiungi o aggiorna un metadato
+ */
+public function updatePostMeta($postId, $metaKey, $metaValue) {
+    // Controlla se esiste
+    $stmt = $this->pdo->prepare("SELECT meta_id FROM " . $this->table('post_meta') . " 
+        WHERE post_id=? AND meta_key=?");
+    $stmt->execute([$postId, $metaKey]);
+    $exists = $stmt->fetch();
+    
+    if ($exists) {
+        // Update
+        $stmt = $this->pdo->prepare("UPDATE " . $this->table('post_meta') . " 
+            SET meta_value=? WHERE post_id=? AND meta_key=?");
+        return $stmt->execute([$metaValue, $postId, $metaKey]);
+    } else {
+        // Insert
+        $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('post_meta') . " 
+            (post_id, meta_key, meta_value) VALUES (?, ?, ?)");
+        return $stmt->execute([$postId, $metaKey, $metaValue]);
+    }
+}
+
+/**
+ * Recupera un metadato
+ */
+public function getPostMeta($postId, $metaKey, $single = true) {
+    $stmt = $this->pdo->prepare("SELECT meta_value FROM " . $this->table('post_meta') . " 
+        WHERE post_id=? AND meta_key=?");
+    $stmt->execute([$postId, $metaKey]);
+    
+    if ($single) {
+        $result = $stmt->fetch();
+        return $result ? $result['meta_value'] : null;
+    }
+    
+    return $stmt->fetchAll(PDO::FETCH_COLUMN);
+}
+
+/**
+ * Recupera tutti i metadati di un post
+ */
+public function getAllPostMeta($postId) {
+    $stmt = $this->pdo->prepare("SELECT meta_key, meta_value FROM " . $this->table('post_meta') . " 
+        WHERE post_id=?");
+    $stmt->execute([$postId]);
+    
+    $meta = [];
+    while ($row = $stmt->fetch()) {
+        $meta[$row['meta_key']] = $row['meta_value'];
+    }
+    return $meta;
+}
+
+/**
+ * Elimina un metadato
+ */
+public function deletePostMeta($postId, $metaKey) {
+    $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('post_meta') . " 
+        WHERE post_id=? AND meta_key=?");
+    return $stmt->execute([$postId, $metaKey]);
+}
+
+    
+    // === CONTENUTI ===
+    public function getPage($slug) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('contents') . " WHERE type='page' AND slug=?");
+        $stmt->execute([$slug]);
+        return $stmt->fetch();
+    }
+    
+    public function getPost($slug) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('contents') . " WHERE type='post' AND slug=?");
+        $stmt->execute([$slug]);
+        return $stmt->fetch();
+    }
+    
+    public function getHomePage() {
+        $stmt = $this->pdo->query("SELECT * FROM " . $this->table('contents') . " WHERE slug='home' LIMIT 1");
+        return $stmt->fetch();
+    }
+    
+    public function getAllContents($type = null) {
+        if ($type) {
+            $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('contents') . " WHERE type=? ORDER BY created_at DESC");
+            $stmt->execute([$type]);
+        } else {
+            $stmt = $this->pdo->query("SELECT * FROM " . $this->table('contents') . " ORDER BY created_at DESC");
+        }
+        return $stmt->fetchAll();
+    }
+    
+    public function getContentById($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('contents') . " WHERE id=?");
+        $stmt->execute([$id]);
+        return $stmt->fetch();
+    }
+    
+    public function saveContent($data) {
+        if (isset($data['id']) && $data['id']) {
+            $stmt = $this->pdo->prepare("UPDATE " . $this->table('contents') . " SET type=?, title=?, slug=?, content=? WHERE id=?");
+            return $stmt->execute([$data['type'], $data['title'], $data['slug'], $data['content'], $data['id']]);
+        } else {
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('contents') . " (type, title, slug, content) VALUES (?, ?, ?, ?)");
+            return $stmt->execute([$data['type'], $data['title'], $data['slug'], $data['content']]);
+        }
+    }
+    
+    public function deleteContent($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('contents') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    // === PLUGIN ===
+    public function getActivePlugins() {
+        try {
+            $stmt = $this->pdo->query("SELECT name FROM " . $this->table('active_plugins'));
+            $result = $stmt->fetchAll(PDO::FETCH_COLUMN);
+            return $result ?: [];
+        } catch (PDOException $e) {
+            error_log('Error getting active plugins: ' . $e->getMessage());
+            return [];
+        }
+    }
+    
+    public function getAvailablePluginsList() {
+        $plugins = [];
+        if (is_dir(PLUGIN_PATH)) {
+            $dirs = scandir(PLUGIN_PATH);
+            foreach ($dirs as $dir) {
+                if ($dir !== '.' && $dir !== '..' && is_dir(PLUGIN_PATH . '/' . $dir)) {
+                    $pluginFile = PLUGIN_PATH . '/' . $dir . '/plugin.php';
+                    if (file_exists($pluginFile)) {
+                        $plugins[] = $dir;
+                    }
+                }
+            }
+        }
+        return $plugins;
+    }
+    
+    public function activatePlugin($name) {
+        $stmt = $this->pdo->prepare("INSERT IGNORE INTO " . $this->table('active_plugins') . " (name) VALUES (?)");
+        return $stmt->execute([$name]);
+    }
+    
+    public function deactivatePlugin($name) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('active_plugins') . " WHERE name=?");
+        return $stmt->execute([$name]);
+    }
+    
+    // === TEMI ===
+    public function getAvailableThemes() {
+        $themes = [];
+        if (is_dir(THEME_PATH)) {
+            $dirs = scandir(THEME_PATH);
+            foreach ($dirs as $dir) {
+                if ($dir !== '.' && $dir !== '..' && is_dir(THEME_PATH . '/' . $dir)) {
+                    $themes[] = $dir;
+                }
+            }
+        }
+        return $themes;
+    }
+    
+    // === MENU ===
+    public function getAllMenus() {
+        return $this->pdo->query("SELECT * FROM " . $this->table('menus') . " ORDER BY name")->fetchAll();
+    }
+    
+    public function getMenuById($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('menus') . " WHERE id=?");
+        $stmt->execute([$id]);
+        return $stmt->fetch();
+    }
+    
+    public function getMenuByLocation($location) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('menus') . " WHERE location=?");
+        $stmt->execute([$location]);
+        return $stmt->fetch();
+    }
+    
+    public function saveMenu($data) {
+        if (isset($data['id']) && $data['id']) {
+            $stmt = $this->pdo->prepare("UPDATE " . $this->table('menus') . " SET name=?, location=? WHERE id=?");
+            $stmt->execute([$data['name'], $data['location'], $data['id']]);
+            return $data['id'];
+        } else {
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('menus') . " (name, location) VALUES (?, ?)");
+            $stmt->execute([$data['name'], $data['location']]);
+            return $this->pdo->lastInsertId();
+        }
+    }
+    
+    public function deleteMenu($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('menus') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    public function getMenuItems($menuId) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('menu_items') . " WHERE menu_id=? ORDER BY sort_order, id");
+        $stmt->execute([$menuId]);
+        return $stmt->fetchAll();
+    }
+    
+    public function saveMenuItem($data) {
+        // Gestisci il tipo di link
+        if (isset($data['link_type'])) {
+            if ($data['link_type'] === 'page' && !empty($data['page_id'])) {
+                // Link a pagina
+                $page = $this->getPageById($data['page_id']);
+                if ($page) {
+                    $data['url'] = '/page/' . $page['slug'];
+                    if (empty($data['title'])) {
+                        $data['title'] = $page['title'];
+                    }
+                }
+            } elseif ($data['link_type'] === 'post' && !empty($data['post_id'])) {
+                // Link a post
+                $post = $this->getPostById($data['post_id']);
+                if ($post) {
+                    $data['url'] = '/post/' . $post['slug'];
+                    if (empty($data['title'])) {
+                        $data['title'] = $post['title'];
+                    }
+                }
+            }
+        }
+        
+        // Gestisci parent_id
+        $parentId = !empty($data['parent_id']) ? $data['parent_id'] : null;
+        
+        if (isset($data['id']) && $data['id']) {
+            // Aggiorna esistente
+            $stmt = $this->pdo->prepare("UPDATE " . $this->table('menu_items') . " 
+                                         SET title=?, url=?, target=?, parent_id=?, sort_order=? 
+                                         WHERE id=?");
+            return $stmt->execute([
+                $data['title'], 
+                $data['url'], 
+                $data['target'], 
+                $parentId,
+                $data['sort_order'] ?? 0, 
+                $data['id']
+            ]);
+        } else {
+            // Calcola sort_order automaticamente
+            if (!isset($data['sort_order'])) {
+                $stmt = $this->pdo->prepare("SELECT MAX(sort_order) as max_order FROM " . $this->table('menu_items') . " WHERE menu_id=?");
+                $stmt->execute([$data['menu_id']]);
+                $result = $stmt->fetch();
+                $data['sort_order'] = ($result['max_order'] ?? -1) + 1;
+            }
+            
+            // Inserisci nuovo
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('menu_items') . " 
+                                         (menu_id, parent_id, title, url, target, sort_order) 
+                                         VALUES (?, ?, ?, ?, ?, ?)");
+            return $stmt->execute([
+                $data['menu_id'], 
+                $parentId,
+                $data['title'], 
+                $data['url'], 
+                $data['target'], 
+                $data['sort_order']
+            ]);
+        }
+    }
+    
+    public function deleteMenuItem($id) {
+        // Elimina anche tutti i figli ricorsivamente
+        $this->deleteMenuItemRecursive($id);
+        return true;
+    }
+
+    private function deleteMenuItemRecursive($id) {
+        // Trova tutti i figli
+        $stmt = $this->pdo->prepare("SELECT id FROM " . $this->table('menu_items') . " WHERE parent_id=?");
+        $stmt->execute([$id]);
+        $children = $stmt->fetchAll(PDO::FETCH_COLUMN);
+        
+        // Elimina ricorsivamente tutti i figli
+        foreach ($children as $childId) {
+            $this->deleteMenuItemRecursive($childId);
+        }
+        
+        // Elimina l'elemento corrente
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('menu_items') . " WHERE id=?");
+        $stmt->execute([$id]);
+    }
+
+    public function updateMenuItemsOrder($menuId, $orderData) {
+        $stmt = $this->pdo->prepare("UPDATE " . $this->table('menu_items') . " SET sort_order=? WHERE id=?");
+        
+        foreach ($orderData as $item) {
+            $stmt->execute([$item['sort_order'], $item['id']]);
+        }
+        
+        return true;
+    }
+    
+    // === WIDGET DASHBOARD ===
+public function getDashboardWidgets() {
+    return $this->pdo->query("SELECT * FROM " . $this->table('dashboard_widgets') . " WHERE is_active=1 ORDER BY position")->fetchAll();
+}
+
+public function getAllDashboardWidgetsForManagement() {
+    return $this->pdo->query("SELECT * FROM " . $this->table('dashboard_widgets') . " ORDER BY position")->fetchAll();
+}
+
+public function toggleDashboardWidget($id) {
+    $stmt = $this->pdo->prepare("UPDATE " . $this->table('dashboard_widgets') . " SET is_active = NOT is_active WHERE id=?");
+    return $stmt->execute([$id]);
+}
+
+/**
+ * Sincronizza widget disponibili nel filesystem con il database
+ * Aggiunge widget nuovi, rimuove widget cancellati fisicamente
+ */
+public function syncDashboardWidgets($availableWidgets) {
+    $prefix = $this->prefix;
+    
+    // Ottieni widget esistenti nel DB
+    $stmt = $this->pdo->query("SELECT widget_type FROM {$prefix}dashboard_widgets");
+    $dbWidgets = $stmt->fetchAll(PDO::FETCH_COLUMN);
+    
+    // Aggiungi widget nuovi (presenti nel filesystem ma non nel DB)
+    foreach ($availableWidgets as $widget) {
+        if (!in_array($widget, $dbWidgets)) {
+            // Calcola prossima posizione
+            $maxPos = $this->pdo->query("SELECT MAX(position) FROM {$prefix}dashboard_widgets")->fetchColumn();
+            $nextPos = ($maxPos ?? 0) + 1;
+            
+            $stmt = $this->pdo->prepare("
+                INSERT INTO {$prefix}dashboard_widgets (widget_type, position, is_active, config) 
+                VALUES (?, ?, 1, NULL)
+            ");
+            $stmt->execute([$widget, $nextPos]);
+        }
+    }
+    
+    // Rimuovi widget cancellati (presenti nel DB ma non nel filesystem)
+    foreach ($dbWidgets as $dbWidget) {
+        if (!in_array($dbWidget, $availableWidgets)) {
+            $stmt = $this->pdo->prepare("DELETE FROM {$prefix}dashboard_widgets WHERE widget_type = ?");
+            $stmt->execute([$dbWidget]);
+        }
+    }
+}
+
+/**
+ * Elimina widget dal DB e dal filesystem
+ */
+public function deleteWidgetPermanently($id) {
+    $prefix = $this->prefix;
+    
+    // Ottieni il widget_type prima di eliminarlo
+    $stmt = $this->pdo->prepare("SELECT widget_type FROM {$prefix}dashboard_widgets WHERE id = ?");
+    $stmt->execute([$id]);
+    $widgetType = $stmt->fetchColumn();
+    
+    if (!$widgetType) {
+        return false;
+    }
+    
+    // Elimina dal database
+    $stmt = $this->pdo->prepare("DELETE FROM {$prefix}dashboard_widgets WHERE id = ?");
+    $stmt->execute([$id]);
+    
+    // Elimina il file fisico
+    $widgetFile = BASE_PATH . '/core/widgets/Widget_' . $widgetType . '.php';
+    if (file_exists($widgetFile)) {
+        unlink($widgetFile);
+    }
+    
+    return true;
+}
+
+    
+    // === WIDGET TEMA ===
+    public function getThemeWidgets($area) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('theme_widget_areas') . " WHERE area_name=? AND is_active=1 ORDER BY position");
+        $stmt->execute([$area]);
+        return $stmt->fetchAll();
+    }
+    
+    public function getAllThemeWidgets() {
+        return $this->pdo->query("SELECT * FROM " . $this->table('theme_widget_areas') . " ORDER BY area_name, position")->fetchAll();
+    }
+    
+    public function saveThemeWidget($data) {
+        if (isset($data['id']) && $data['id']) {
+            $stmt = $this->pdo->prepare("UPDATE " . $this->table('theme_widget_areas') . " SET area_name=?, widget_type=?, position=?, is_active=?, config=? WHERE id=?");
+            return $stmt->execute([$data['area_name'], $data['widget_type'], $data['position'], $data['is_active'], $data['config'], $data['id']]);
+        } else {
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('theme_widget_areas') . " (area_name, widget_type, position, is_active, config) VALUES (?, ?, ?, ?, ?)");
+            return $stmt->execute([$data['area_name'], $data['widget_type'], $data['position'], $data['is_active'], $data['config']]);
+        }
+    }
+    
+    public function deleteThemeWidget($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('theme_widget_areas') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    // === GESTIONE PAGINE ===
+    // MODIFICATO: Esclude pagine nel cestino
+    public function getAllPages() {
+        return $this->pdo->query("SELECT p.*, u.name as author_name FROM " . $this->table('pages') . " p 
+                                  LEFT JOIN " . $this->table('users') . " u ON p.author_id = u.id 
+                                  WHERE p.deleted_at IS NULL
+                                  ORDER BY p.created_at DESC")->fetchAll();
+    }
+    
+    public function getPageById($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('pages') . " WHERE id=?");
+        $stmt->execute([$id]);
+        return $stmt->fetch();
+    }
+    
+    public function getPageBySlug($slug) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('pages') . " WHERE slug=? AND status='pubblicato' AND deleted_at IS NULL");
+        $stmt->execute([$slug]);
+        return $stmt->fetch();
+    }
+    
+    public function savePage($data) {
+        if (isset($data['id']) && $data['id']) {
+            $stmt = $this->pdo->prepare("UPDATE " . $this->table('pages') . " SET title=?, slug=?, content=?, featured_image=?, status=? WHERE id=?");
+            return $stmt->execute([$data['title'], $data['slug'], $data['content'], $data['featured_image'] ?? null, $data['status'], $data['id']]);
+        } else {
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('pages') . " (title, slug, content, featured_image, status, author_id) VALUES (?, ?, ?, ?, ?, ?)");
+            return $stmt->execute([$data['title'], $data['slug'], $data['content'], $data['featured_image'] ?? null, $data['status'], $_SESSION['user_id']]);
+        }
+    }
+    
+    public function deletePage($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('pages') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    // === GESTIONE POST ===
+    // MODIFICATO: Esclude post nel cestino
+    public function getAllPosts() {
+        return $this->pdo->query("SELECT p.*, u.name as author_name FROM " . $this->table('posts') . " p 
+                                  LEFT JOIN " . $this->table('users') . " u ON p.author_id = u.id 
+                                  WHERE p.deleted_at IS NULL
+                                  ORDER BY p.created_at DESC")->fetchAll();
+    }
+    
+    public function getPublishedPosts($limit = null) {
+        $sql = "SELECT p.*, u.name as author_name FROM " . $this->table('posts') . " p 
+                LEFT JOIN " . $this->table('users') . " u ON p.author_id = u.id 
+                WHERE p.status='pubblicato' AND p.deleted_at IS NULL
+                ORDER BY p.created_at DESC";
+        if ($limit) {
+            $sql .= " LIMIT " . (int)$limit;
+        }
+        return $this->pdo->query($sql)->fetchAll();
+    }
+    
+    public function getPostById($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('posts') . " WHERE id=?");
+        $stmt->execute([$id]);
+        return $stmt->fetch();
+    }
+    
+    public function getPostBySlug($slug) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('posts') . " WHERE slug = ? AND status = 'pubblicato' AND deleted_at IS NULL");
+        $stmt->execute([$slug]);
+        $post = $stmt->fetch(PDO::FETCH_ASSOC);
+        
+       /* if ($post) {
+            // Hook per modificare il contenuto del post
+            $post = apply_hook('mycms_post_content', $post);
+        }*/
+        
+        return $post;
+    }
+
+    
+    public function savePost($data) {
+        // Hook prima del salvataggio
+        $data = apply_hook('mycms_before_save_post', $data);
+        
+        if (isset($data['id']) && $data['id']) {
+            $stmt = $this->pdo->prepare("UPDATE " . $this->table('posts') . " SET title=?, slug=?, content=?, excerpt=?, featured_image=?, status=? WHERE id=?");
+            $result = $stmt->execute([$data['title'], $data['slug'], $data['content'], $data['excerpt'] ?? '', $data['featured_image'] ?? null, $data['status'], $data['id']]);
+            $postId = $data['id'];
+        } else {
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('posts') . " (title, slug, content, excerpt, featured_image, status, author_id) VALUES (?, ?, ?, ?, ?, ?, ?)");
+            $result = $stmt->execute([$data['title'], $data['slug'], $data['content'], $data['excerpt'] ?? '', $data['featured_image'] ?? null, $data['status'], $_SESSION['user_id']]);
+            $postId = $this->pdo->lastInsertId();
+        }
+        
+        // Gestisci categorie
+        if ($result && isset($data['categories'])) {
+            $this->pdo->prepare("DELETE FROM " . $this->table('post_categories') . " WHERE post_id=?")->execute([$postId]);
+            if (!empty($data['categories'])) {
+                $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('post_categories') . " (post_id, category_id) VALUES (?, ?)");
+                foreach ($data['categories'] as $catId) {
+                    $stmt->execute([$postId, $catId]);
+                }
+            }
+        }
+        
+        // Hook dopo il salvataggio
+        do_hook('mycms_after_save_post', $postId, $data);
+        
+        return $postId;
+    }
+    
+    public function deletePost($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('posts') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    public function getPostCategories($postId) {
+        $stmt = $this->pdo->prepare("SELECT c.* FROM " . $this->table('categories') . " c 
+                                     INNER JOIN " . $this->table('post_categories') . " pc ON c.id = pc.category_id 
+                                     WHERE pc.post_id = ?");
+        $stmt->execute([$postId]);
+        return $stmt->fetchAll();
+    }
+    
+    // === GESTIONE CATEGORIE ===
+    public function getAllCategories() {
+        return $this->pdo->query("SELECT * FROM " . $this->table('categories') . " ORDER BY name")->fetchAll();
+    }
+    
+    public function getCategoryById($id) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('categories') . " WHERE id=?");
+        $stmt->execute([$id]);
+        return $stmt->fetch();
+    }
+    
+    public function getCategoryBySlug($slug) {
+        $stmt = $this->pdo->prepare("SELECT * FROM " . $this->table('categories') . " WHERE slug=?");
+        $stmt->execute([$slug]);
+        return $stmt->fetch();
+    }
+    
+    public function saveCategory($data) {
+        if (isset($data['id']) && $data['id']) {
+            $stmt = $this->pdo->prepare("UPDATE " . $this->table('categories') . " SET name=?, slug=?, description=? WHERE id=?");
+            return $stmt->execute([$data['name'], $data['slug'], $data['description'] ?? '', $data['id']]);
+        } else {
+            $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('categories') . " (name, slug, description) VALUES (?, ?, ?)");
+            return $stmt->execute([$data['name'], $data['slug'], $data['description'] ?? '']);
+        }
+    }
+    
+    public function deleteCategory($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('categories') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    // === GESTIONE UPLOAD ===
+    public function saveUpload($data) {
+        $stmt = $this->pdo->prepare("INSERT INTO " . $this->table('uploads') . " (filename, original_name, mime_type, size, uploaded_by) VALUES (?, ?, ?, ?, ?)");
+        $stmt->execute([$data['filename'], $data['original_name'], $data['mime_type'], $data['size'], $_SESSION['user_id'] ?? null]);
+        return $this->pdo->lastInsertId();
+    }
+    
+    
+    
+    // === GESTIONE CESTINO POST ===
+    
+    /**
+     * Sposta un post nel cestino
+     */
+    public function trashPost($id) {
+        $stmt = $this->pdo->prepare("UPDATE " . $this->table('posts') . " SET deleted_at = NOW() WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    /**
+     * Recupera tutti i post nel cestino
+     */
+    public function getTrashedPosts() {
+        return $this->pdo->query("SELECT p.*, u.name as author_name FROM " . $this->table('posts') . " p 
+                                  LEFT JOIN " . $this->table('users') . " u ON p.author_id = u.id 
+                                  WHERE p.deleted_at IS NOT NULL 
+                                  ORDER BY p.deleted_at DESC")->fetchAll();
+    }
+    
+    /**
+ * Ripristina un post dal cestino
+ */
+public function restorePost($id) {
+    $stmt = $this->pdo->prepare("UPDATE " . $this->table('posts') . " SET deleted_at = NULL WHERE id=?");
+    return $stmt->execute([$id]);
+}
+    
+    /**
+     * Elimina definitivamente un post
+     */
+    public function deletePostPermanently($id) {
+        // Elimina prima le associazioni con le categorie
+        $this->pdo->prepare("DELETE FROM " . $this->table('post_categories') . " WHERE post_id=?")->execute([$id]);
+        // Elimina il post
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('posts') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    /**
+     * Svuota completamente il cestino dei post
+     */
+    public function emptyPostTrash() {
+        $trashedPosts = $this->getTrashedPosts();
+        foreach ($trashedPosts as $post) {
+            $this->deletePostPermanently($post['id']);
+        }
+        return true;
+    }
+    
+    // === GESTIONE CESTINO PAGINE ===
+    
+    /**
+     * Sposta una pagina nel cestino
+     */
+    public function trashPage($id) {
+        $stmt = $this->pdo->prepare("UPDATE " . $this->table('pages') . " SET deleted_at = NOW() WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    /**
+     * Recupera tutte le pagine nel cestino
+     */
+    public function getTrashedPages() {
+        return $this->pdo->query("SELECT p.*, u.name as author_name FROM " . $this->table('pages') . " p 
+                                  LEFT JOIN " . $this->table('users') . " u ON p.author_id = u.id 
+                                  WHERE p.deleted_at IS NOT NULL 
+                                  ORDER BY p.deleted_at DESC")->fetchAll();
+    }
+    
+    /**
+     * Ripristina una pagina dal cestino
+     */
+    public function restorePage($id) {
+        $stmt = $this->pdo->prepare("UPDATE " . $this->table('pages') . " SET deleted_at = NULL WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    /**
+     * Elimina definitivamente una pagina
+     */
+    public function deletePagePermanently($id) {
+        $stmt = $this->pdo->prepare("DELETE FROM " . $this->table('pages') . " WHERE id=?");
+        return $stmt->execute([$id]);
+    }
+    
+    /**
+     * Svuota completamente il cestino delle pagine
+     */
+    public function emptyPageTrash() {
+        $trashedPages = $this->getTrashedPages();
+        foreach ($trashedPages as $page) {
+            $this->deletePagePermanently($page['id']);
+        }
+        return true;
+    }
+}
+?>

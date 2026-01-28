@@ -1,0 +1,19 @@
+<div class="site-main">
+    <div class="container">
+        <div class="content-wrapper">
+            <article class="article-single">
+                <header class="article-header">
+                    <h1 class="article-title"><?php echo htmlspecialchars($title); ?></h1>
+                </header>
+                
+                <div class="article-content">
+                    <?php echo $body; ?>
+                </div>
+            </article>
+            
+            <aside class="sidebar">
+                <?php $this->widgetArea('sidebar'); ?>
+            </aside>
+        </div>
+    </div>
+</div>

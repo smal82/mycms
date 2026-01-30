@@ -1,0 +1,19 @@
+# Robots.txt per MyCMS
+User-agent: *
+Allow: /
+
+User-agent: MSNBot
+Crawl-delay: 5
+
+User-agent: bingbot
+Crawl-delay: 5
+
+# Disallow admin e file sensibili
+Disallow: /admin/
+Disallow: /core/
+Disallow: /content/
+Disallow: /install.php
+Disallow: /install-ajax.php
+
+# Sitemap
+Sitemap: https://mycms.salvatoremaltese.it/sitemap.php

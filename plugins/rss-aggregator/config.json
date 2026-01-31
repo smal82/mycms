@@ -1,0 +1,14 @@
+{
+    "name": "RSS Feed Aggregator",
+    "version": "1.0.0",
+    "description": "Aggrega feed RSS multipli e pubblica automaticamente le news",
+    "author": "smal",
+    "requires": "1.0.0",
+    "tables": [
+        "rss_feeds",
+        "rss_imported_items"
+    ],
+    "custom_post_types": [
+        "news"
+    ]
+}

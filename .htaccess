@@ -1,0 +1,27 @@
+RewriteEngine On
+
+# Forza HTTPS
+RewriteCond %{HTTPS} off
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# Forza Content-Type XML per sitemap
+<Files "sitemap.php">
+    Header set Content-Type "application/xml; charset=utf-8"
+</Files>
+
+# Sitemap rewrite - DEVE essere PRIMA di tutto
+RewriteRule ^sitemap\.xml$ sitemap.php [L]
+
+# Permetti l'accesso diretto ai file esistenti
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# Permetti l'accesso diretto alle directory esistenti
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Route API - PRIMA delle route normali
+RewriteRule ^api/(.*)$ api.php [QSA,L]
+
+# Route normali del CMS
+RewriteRule ^(.*)$ index.php [QSA,L]

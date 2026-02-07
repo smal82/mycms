@@ -1,0 +1,38 @@
+RewriteEngine On
+
+# Forza HTTPS
+RewriteCond %{HTTPS} off
+RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# Forza Content-Type XML per sitemap
+<Files "sitemap.php">
+    Header set Content-Type "application/xml; charset=utf-8"
+</Files>
+
+# Sitemap rewrite - DEVE essere PRIMA di tutto
+RewriteRule ^sitemap\.xml$ sitemap.php [L]
+
+# Permetti l'accesso diretto ai file esistenti
+RewriteCond %{REQUEST_FILENAME} -f
+RewriteRule ^ - [L]
+
+# Permetti l'accesso diretto alle directory esistenti
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+# Route API - PRIMA delle route normali
+RewriteRule ^api/(.*)$ api.php [QSA,L]
+
+# Route normali del CMS
+RewriteRule ^(.*)$ index.php [QSA,L]
+
+# SP BEGIN php handler
+<IfModule mod_fcgid.c>
+          AddHandler fcgid-script .php .php5 .php7 .phtml
+          FcgidWrapper    /usr/local/cpanel/cgi-sys/sp-ea-php83 .php
+          FcgidWrapper    /usr/local/cpanel/cgi-sys/sp-ea-php83 .php5
+          FcgidWrapper    /usr/local/cpanel/cgi-sys/sp-ea-php83 .php7
+          FcgidWrapper    /usr/local/cpanel/cgi-sys/sp-ea-php83 .phtml
+</IfModule>
+# SP END php handler
+

@@ -7,9 +7,9 @@
 // === CONFIGURAZIONE DATABASE ===
 // Compila questi dati durante l'installazione
 define('DB_HOST', 'localhost');
-define('DB_NAME', 'bsalvati_smal');
-define('DB_USER', 'bsalvati_bsalvati');
-define('DB_PASS', '&WCVl^v;..sS');
+define('DB_NAME', '');
+define('DB_USER', '');
+define('DB_PASS', '');
 define('DB_PREFIX', 'cmsmio_');
 define('DB_CHARSET', 'utf8mb4');
 
